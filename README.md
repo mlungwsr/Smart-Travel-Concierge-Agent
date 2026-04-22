@@ -126,6 +126,65 @@ agentcore dev      # local development
 agentcore deploy   # deploy to production
 ```
 
+### 6. Create the AgentCore Gateway (Console)
+
+The Gateway exposes your Lambda functions as MCP-compatible tools that the deployed agent can discover automatically.
+
+1. Navigate to **Amazon Bedrock → AgentCore → Gateway → Create gateway**
+2. **Name:** `travel-concierge-gateway`, **Inbound Auth:** `None`
+3. **Add Target — Flight Search:**
+   - Type: `Lambda function ARN`
+   - ARN: `travel-flight-search` Lambda ARN
+   - Inline schema:
+   ```json
+   [
+     {
+       "name": "search_flights",
+       "description": "Search for flights between two cities.",
+       "inputSchema": {
+         "type": "object",
+         "properties": {
+           "origin": { "type": "string", "description": "Departure city" },
+           "destination": { "type": "string", "description": "Arrival city" },
+           "date": { "type": "string", "description": "YYYY-MM-DD (empty=today)" },
+           "num_results": { "type": "number", "description": "Results count" }
+         },
+         "required": ["origin", "destination"]
+       }
+     }
+   ]
+   ```
+4. **Add Target — Weather Lookup:**
+   - Type: `Lambda function ARN`
+   - ARN: `travel-weather-lookup` Lambda ARN
+   - Inline schema:
+   ```json
+   [
+     {
+       "name": "check_weather",
+       "description": "Check current weather and 5-day forecast for a city.",
+       "inputSchema": {
+         "type": "object",
+         "properties": {
+           "city": { "type": "string", "description": "City name" }
+         },
+         "required": ["city"]
+       }
+     }
+   ]
+   ```
+5. **Review & Create**
+
+### 7. Link Gateway and Deploy
+
+```bash
+cd /tmp/travelagent
+agentcore add gateway --name travel-concierge-gateway
+agentcore deploy
+```
+
+> **Note:** During local development (`agentcore dev`), the agent calls Lambda directly via boto3. After deployment, the agent discovers tools via Gateway using MCP — same agent code, different tool delivery.
+
 ## Cleanup
 
 ```bash
