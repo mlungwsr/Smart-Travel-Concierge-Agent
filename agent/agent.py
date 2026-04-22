@@ -69,7 +69,7 @@ def check_weather(city: str) -> str:
 
 # --- Create the Agent ---
 agent = Agent(
-    model="us.anthropic.claude-sonnet-4-20250514",
+    model="us.amazon.nova-pro-v1:0",
     system_prompt=SYSTEM_PROMPT,
     tools=[search_flights, check_weather],
 )

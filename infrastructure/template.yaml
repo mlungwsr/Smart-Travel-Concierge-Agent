@@ -2,6 +2,7 @@ AWSTemplateFormatVersion: '2010-09-09'
 Description: >
   Smart Travel Concierge Agent — Pre-deployed resources.
   Deploys flight-search and weather-lookup Lambda functions with IAM roles.
+  API keys are read from SSM Parameter Store at runtime.
 
 Resources:
 
@@ -19,6 +20,16 @@ Resources:
             Action: sts:AssumeRole
       ManagedPolicyArns:
         - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+      Policies:
+        - PolicyName: SSMParameterReadAccess
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - ssm:GetParameter
+                Resource:
+                  - !Sub arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter/travel-concierge/*
 
   # --- Flight Search Lambda ---
   FlightSearchFunction:
@@ -32,9 +43,20 @@ Resources:
       Role: !GetAtt TravelLambdaRole.Arn
       Code:
         ZipFile: |
-          import json, random
+          import json, os, random, boto3
           from datetime import datetime, timedelta
+          from urllib import request, parse
 
+          REGION = os.environ.get("AWS_REGION", "us-west-2")
+          _api_key = None
+          AIRPORTS = {
+              "johannesburg": "JNB", "cape town": "CPT", "durban": "DUR",
+              "nairobi": "NBO", "lagos": "LOS", "accra": "ACC",
+              "cairo": "CAI", "addis ababa": "ADD", "dar es salaam": "DAR",
+              "london": "LHR", "dubai": "DXB", "new york": "JFK",
+              "paris": "CDG", "tokyo": "NRT", "sydney": "SYD",
+              "mumbai": "BOM", "singapore": "SIN", "bangkok": "BKK",
+          }
           AIRLINES = [
               {"code": "SA", "name": "South African Airways"},
               {"code": "KQ", "name": "Kenya Airways"},
@@ -44,56 +66,79 @@ Resources:
               {"code": "QR", "name": "Qatar Airways"},
               {"code": "TK", "name": "Turkish Airlines"},
           ]
-          AIRPORTS = {
-              "johannesburg": "JNB", "cape town": "CPT", "durban": "DUR",
-              "nairobi": "NBO", "lagos": "LOS", "accra": "ACC",
-              "cairo": "CAI", "addis ababa": "ADD", "dar es salaam": "DAR",
-              "london": "LHR", "dubai": "DXB", "new york": "JFK",
-              "paris": "CDG", "tokyo": "NRT", "sydney": "SYD",
-              "mumbai": "BOM", "singapore": "SIN", "bangkok": "BKK",
-          }
+
+          def get_api_key():
+              global _api_key
+              if _api_key is None:
+                  ssm = boto3.client("ssm", region_name=REGION)
+                  _api_key = ssm.get_parameter(Name="/travel-concierge/aviationstack-api-key", WithDecryption=True)["Parameter"]["Value"]
+              return _api_key
 
           def resolve_airport(city):
               return AIRPORTS.get(city.strip().lower(), city.upper()[:3])
 
-          def lambda_handler(event, context):
-              body = event.get("body")
-              if isinstance(body, str):
-                  body = json.loads(body)
-              elif body is None:
-                  body = event
-              origin = body.get("origin", "Johannesburg")
-              destination = body.get("destination", "Cape Town")
-              date = body.get("date", (datetime.now() + timedelta(days=14)).strftime("%Y-%m-%d"))
-              num_results = int(body.get("num_results", 5))
-              o, d = resolve_airport(origin), resolve_airport(destination)
+          def fetch_real_flights(dep_iata, arr_iata, limit=5):
+              key = get_api_key()
+              params = parse.urlencode({"access_key": key, "dep_iata": dep_iata, "arr_iata": arr_iata, "limit": limit})
+              url = f"http://api.aviationstack.com/v1/flights?{params}"
+              req = request.Request(url, headers={"User-Agent": "SmartTravelConcierge/1.0"})
+              with request.urlopen(req, timeout=8) as resp:
+                  data = json.loads(resp.read().decode())
+              if "data" not in data or not data["data"]:
+                  raise ValueError("No flight data returned")
+              flights = []
+              for f in data["data"][:limit]:
+                  dep, arr = f.get("departure", {}), f.get("arrival", {})
+                  airline, fi = f.get("airline", {}), f.get("flight", {})
+                  flights.append({
+                      "flight_number": fi.get("iata", "N/A"), "airline": airline.get("name", "Unknown"),
+                      "origin": dep.get("iata", dep_iata), "destination": arr.get("iata", arr_iata),
+                      "departure_date": f.get("flight_date", "N/A"),
+                      "departure_time": (dep.get("scheduled") or "N/A")[:16],
+                      "arrival_time": (arr.get("scheduled") or "N/A")[:16],
+                      "flight_status": f.get("flight_status", "unknown"),
+                      "departure_airport": dep.get("airport", "N/A"),
+                      "arrival_airport": arr.get("airport", "N/A"),
+                  })
+              return flights
+
+          def mock_flights(o, d, date, n=5):
               random.seed(hash(f"{o}{d}{date}") % 2**32)
               base = random.randint(200, 1200)
               flights = []
-              for _ in range(num_results):
+              for _ in range(n):
                   a = random.choice(AIRLINES)
                   price = max(base + random.randint(-150, 300), 99)
                   flights.append({
-                      "flight_number": f"{a['code']}{random.randint(100,999)}",
-                      "airline": a["name"],
-                      "origin": o, "destination": d,
-                      "departure_date": date,
+                      "flight_number": f"{a['code']}{random.randint(100,999)}", "airline": a["name"],
+                      "origin": o, "destination": d, "departure_date": date,
                       "departure_time": f"{random.randint(5,22):02d}:{random.choice([0,15,30,45]):02d}",
                       "duration": f"{random.randint(1,14)}h {random.choice([0,15,30,45])}m",
                       "stops": random.choices([0,1,2], weights=[50,35,15])[0],
-                      "price_usd": price,
-                      "cabin_class": "Economy",
-                      "seats_available": random.randint(1, 42),
+                      "price_usd": price, "cabin_class": "Economy", "seats_available": random.randint(1,42),
                   })
               flights.sort(key=lambda f: f["price_usd"])
-              return {
-                  "statusCode": 200,
-                  "body": json.dumps({
-                      "search_query": {"origin": f"{origin} ({o})", "destination": f"{destination} ({d})", "date": date},
-                      "results_count": len(flights),
-                      "flights": flights,
-                  }),
-              }
+              return flights
+
+          def lambda_handler(event, context):
+              body = event.get("body")
+              if isinstance(body, str): body = json.loads(body)
+              elif body is None: body = event
+              origin = body.get("origin", "Johannesburg")
+              destination = body.get("destination", "Cape Town")
+              date = body.get("date", (datetime.now() + timedelta(days=14)).strftime("%Y-%m-%d"))
+              num = int(body.get("num_results", 5))
+              o, d = resolve_airport(origin), resolve_airport(destination)
+              try:
+                  flights, source = fetch_real_flights(o, d, num), "aviationstack"
+              except Exception as e:
+                  print(f"AviationStack failed ({e}), using mock")
+                  flights, source = mock_flights(o, d, date, num), "mock"
+              return {"statusCode": 200, "body": json.dumps({
+                  "source": source,
+                  "search_query": {"origin": f"{origin} ({o})", "destination": f"{destination} ({d})", "date": date},
+                  "results_count": len(flights), "flights": flights,
+              })}
 
   # --- Weather Lookup Lambda ---
   WeatherLookupFunction:
@@ -107,64 +152,63 @@ Resources:
       Role: !GetAtt TravelLambdaRole.Arn
       Code:
         ZipFile: |
-          import json, random
-          from urllib import request
+          import json, os, random, boto3
+          from urllib import request, parse
 
-          def fetch_weather(city):
-              try:
-                  url = f"https://wttr.in/{city}?format=j1"
-                  req = request.Request(url, headers={"User-Agent": "SmartTravelConcierge/1.0"})
-                  with request.urlopen(req, timeout=5) as resp:
-                      data = json.loads(resp.read().decode())
-                  cur = data["current_condition"][0]
-                  forecast = []
-                  for day in data.get("weather", [])[:5]:
-                      forecast.append({
-                          "date": day["date"],
-                          "max_temp_c": day["maxtempC"],
-                          "min_temp_c": day["mintempC"],
-                          "description": day["hourly"][4]["weatherDesc"][0]["value"],
-                          "chance_of_rain": day["hourly"][4]["chanceofrain"],
-                      })
-                  return {
-                      "source": "wttr.in", "city": city,
-                      "current": {
-                          "temp_c": cur["temp_C"], "feels_like_c": cur["FeelsLikeC"],
-                          "humidity": cur["humidity"],
-                          "description": cur["weatherDesc"][0]["value"],
-                          "wind_speed_kmh": cur["windspeedKmph"],
-                      },
-                      "forecast": forecast,
-                  }
-              except Exception:
-                  random.seed(hash(city) % 2**32)
-                  conds = ["Sunny", "Partly Cloudy", "Cloudy", "Light Rain", "Clear"]
-                  return {
-                      "source": "mock", "city": city,
-                      "current": {
-                          "temp_c": str(random.randint(15,35)),
-                          "feels_like_c": str(random.randint(14,36)),
-                          "humidity": str(random.randint(30,80)),
-                          "description": random.choice(conds),
-                          "wind_speed_kmh": str(random.randint(5,30)),
-                      },
-                      "forecast": [
-                          {"date": f"Day {i+1}", "max_temp_c": str(random.randint(20,35)),
-                           "min_temp_c": str(random.randint(10,20)),
-                           "description": random.choice(conds),
-                           "chance_of_rain": str(random.randint(0,60))}
-                          for i in range(5)
-                      ],
-                  }
+          REGION = os.environ.get("AWS_REGION", "us-west-2")
+          _api_key = None
+
+          def get_api_key():
+              global _api_key
+              if _api_key is None:
+                  ssm = boto3.client("ssm", region_name=REGION)
+                  _api_key = ssm.get_parameter(Name="/travel-concierge/weatherapi-api-key", WithDecryption=True)["Parameter"]["Value"]
+              return _api_key
+
+          def fetch_real_weather(city):
+              key = get_api_key()
+              params = parse.urlencode({"key": key, "q": city, "days": 5, "aqi": "no"})
+              url = f"http://api.weatherapi.com/v1/forecast.json?{params}"
+              req = request.Request(url, headers={"User-Agent": "SmartTravelConcierge/1.0"})
+              with request.urlopen(req, timeout=8) as resp:
+                  data = json.loads(resp.read().decode())
+              cur = data["current"]
+              forecast = []
+              for day in data.get("forecast", {}).get("forecastday", []):
+                  d = day["day"]
+                  forecast.append({"date": day["date"], "max_temp_c": str(d["maxtemp_c"]),
+                      "min_temp_c": str(d["mintemp_c"]), "description": d["condition"]["text"],
+                      "chance_of_rain": str(d["daily_chance_of_rain"]), "avg_humidity": str(d["avghumidity"])})
+              return {"source": "weatherapi.com", "city": data["location"]["name"],
+                  "country": data["location"]["country"],
+                  "current": {"temp_c": str(cur["temp_c"]), "feels_like_c": str(cur["feelslike_c"]),
+                      "humidity": str(cur["humidity"]), "description": cur["condition"]["text"],
+                      "wind_speed_kmh": str(cur["wind_kph"]), "uv_index": str(cur["uv"])},
+                  "forecast": forecast}
+
+          def mock_weather(city):
+              random.seed(hash(city) % 2**32)
+              conds = ["Sunny", "Partly Cloudy", "Cloudy", "Light Rain", "Clear"]
+              return {"source": "mock", "city": city, "country": "Unknown",
+                  "current": {"temp_c": str(random.randint(15,35)), "feels_like_c": str(random.randint(14,36)),
+                      "humidity": str(random.randint(30,80)), "description": random.choice(conds),
+                      "wind_speed_kmh": str(random.randint(5,30)), "uv_index": str(random.randint(1,10))},
+                  "forecast": [{"date": f"Day {i+1}", "max_temp_c": str(random.randint(20,35)),
+                      "min_temp_c": str(random.randint(10,20)), "description": random.choice(conds),
+                      "chance_of_rain": str(random.randint(0,60)), "avg_humidity": str(random.randint(30,80))}
+                      for i in range(5)]}
 
           def lambda_handler(event, context):
               body = event.get("body")
-              if isinstance(body, str):
-                  body = json.loads(body)
-              elif body is None:
-                  body = event
+              if isinstance(body, str): body = json.loads(body)
+              elif body is None: body = event
               city = body.get("city", "Cape Town")
-              return {"statusCode": 200, "body": json.dumps(fetch_weather(city))}
+              try:
+                  weather = fetch_real_weather(city)
+              except Exception as e:
+                  print(f"WeatherAPI failed ({e}), using mock")
+                  weather = mock_weather(city)
+              return {"statusCode": 200, "body": json.dumps(weather)}
 
 Outputs:
   FlightSearchArn:
