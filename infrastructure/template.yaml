@@ -1,0 +1,184 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: >
+  Smart Travel Concierge Agent — Pre-deployed resources.
+  Deploys flight-search and weather-lookup Lambda functions with IAM roles.
+
+Resources:
+
+  # --- IAM Role for Lambda Functions ---
+  TravelLambdaRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: travel-concierge-lambda-role
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+
+  # --- Flight Search Lambda ---
+  FlightSearchFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: travel-flight-search
+      Runtime: python3.12
+      Handler: index.lambda_handler
+      Timeout: 15
+      MemorySize: 128
+      Role: !GetAtt TravelLambdaRole.Arn
+      Code:
+        ZipFile: |
+          import json, random
+          from datetime import datetime, timedelta
+
+          AIRLINES = [
+              {"code": "SA", "name": "South African Airways"},
+              {"code": "KQ", "name": "Kenya Airways"},
+              {"code": "ET", "name": "Ethiopian Airlines"},
+              {"code": "EK", "name": "Emirates"},
+              {"code": "BA", "name": "British Airways"},
+              {"code": "QR", "name": "Qatar Airways"},
+              {"code": "TK", "name": "Turkish Airlines"},
+          ]
+          AIRPORTS = {
+              "johannesburg": "JNB", "cape town": "CPT", "durban": "DUR",
+              "nairobi": "NBO", "lagos": "LOS", "accra": "ACC",
+              "cairo": "CAI", "addis ababa": "ADD", "dar es salaam": "DAR",
+              "london": "LHR", "dubai": "DXB", "new york": "JFK",
+              "paris": "CDG", "tokyo": "NRT", "sydney": "SYD",
+              "mumbai": "BOM", "singapore": "SIN", "bangkok": "BKK",
+          }
+
+          def resolve_airport(city):
+              return AIRPORTS.get(city.strip().lower(), city.upper()[:3])
+
+          def lambda_handler(event, context):
+              body = event.get("body")
+              if isinstance(body, str):
+                  body = json.loads(body)
+              elif body is None:
+                  body = event
+              origin = body.get("origin", "Johannesburg")
+              destination = body.get("destination", "Cape Town")
+              date = body.get("date", (datetime.now() + timedelta(days=14)).strftime("%Y-%m-%d"))
+              num_results = int(body.get("num_results", 5))
+              o, d = resolve_airport(origin), resolve_airport(destination)
+              random.seed(hash(f"{o}{d}{date}") % 2**32)
+              base = random.randint(200, 1200)
+              flights = []
+              for _ in range(num_results):
+                  a = random.choice(AIRLINES)
+                  price = max(base + random.randint(-150, 300), 99)
+                  flights.append({
+                      "flight_number": f"{a['code']}{random.randint(100,999)}",
+                      "airline": a["name"],
+                      "origin": o, "destination": d,
+                      "departure_date": date,
+                      "departure_time": f"{random.randint(5,22):02d}:{random.choice([0,15,30,45]):02d}",
+                      "duration": f"{random.randint(1,14)}h {random.choice([0,15,30,45])}m",
+                      "stops": random.choices([0,1,2], weights=[50,35,15])[0],
+                      "price_usd": price,
+                      "cabin_class": "Economy",
+                      "seats_available": random.randint(1, 42),
+                  })
+              flights.sort(key=lambda f: f["price_usd"])
+              return {
+                  "statusCode": 200,
+                  "body": json.dumps({
+                      "search_query": {"origin": f"{origin} ({o})", "destination": f"{destination} ({d})", "date": date},
+                      "results_count": len(flights),
+                      "flights": flights,
+                  }),
+              }
+
+  # --- Weather Lookup Lambda ---
+  WeatherLookupFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: travel-weather-lookup
+      Runtime: python3.12
+      Handler: index.lambda_handler
+      Timeout: 15
+      MemorySize: 128
+      Role: !GetAtt TravelLambdaRole.Arn
+      Code:
+        ZipFile: |
+          import json, random
+          from urllib import request
+
+          def fetch_weather(city):
+              try:
+                  url = f"https://wttr.in/{city}?format=j1"
+                  req = request.Request(url, headers={"User-Agent": "SmartTravelConcierge/1.0"})
+                  with request.urlopen(req, timeout=5) as resp:
+                      data = json.loads(resp.read().decode())
+                  cur = data["current_condition"][0]
+                  forecast = []
+                  for day in data.get("weather", [])[:5]:
+                      forecast.append({
+                          "date": day["date"],
+                          "max_temp_c": day["maxtempC"],
+                          "min_temp_c": day["mintempC"],
+                          "description": day["hourly"][4]["weatherDesc"][0]["value"],
+                          "chance_of_rain": day["hourly"][4]["chanceofrain"],
+                      })
+                  return {
+                      "source": "wttr.in", "city": city,
+                      "current": {
+                          "temp_c": cur["temp_C"], "feels_like_c": cur["FeelsLikeC"],
+                          "humidity": cur["humidity"],
+                          "description": cur["weatherDesc"][0]["value"],
+                          "wind_speed_kmh": cur["windspeedKmph"],
+                      },
+                      "forecast": forecast,
+                  }
+              except Exception:
+                  random.seed(hash(city) % 2**32)
+                  conds = ["Sunny", "Partly Cloudy", "Cloudy", "Light Rain", "Clear"]
+                  return {
+                      "source": "mock", "city": city,
+                      "current": {
+                          "temp_c": str(random.randint(15,35)),
+                          "feels_like_c": str(random.randint(14,36)),
+                          "humidity": str(random.randint(30,80)),
+                          "description": random.choice(conds),
+                          "wind_speed_kmh": str(random.randint(5,30)),
+                      },
+                      "forecast": [
+                          {"date": f"Day {i+1}", "max_temp_c": str(random.randint(20,35)),
+                           "min_temp_c": str(random.randint(10,20)),
+                           "description": random.choice(conds),
+                           "chance_of_rain": str(random.randint(0,60))}
+                          for i in range(5)
+                      ],
+                  }
+
+          def lambda_handler(event, context):
+              body = event.get("body")
+              if isinstance(body, str):
+                  body = json.loads(body)
+              elif body is None:
+                  body = event
+              city = body.get("city", "Cape Town")
+              return {"statusCode": 200, "body": json.dumps(fetch_weather(city))}
+
+Outputs:
+  FlightSearchArn:
+    Description: ARN of the flight search Lambda
+    Value: !GetAtt FlightSearchFunction.Arn
+    Export:
+      Name: travel-flight-search-arn
+
+  WeatherLookupArn:
+    Description: ARN of the weather lookup Lambda
+    Value: !GetAtt WeatherLookupFunction.Arn
+    Export:
+      Name: travel-weather-lookup-arn
+
+  LambdaRoleArn:
+    Description: ARN of the Lambda execution role
+    Value: !GetAtt TravelLambdaRole.Arn
