@@ -120,15 +120,21 @@ def lambda_handler(event, context):
 
     origin = body.get("origin", "Johannesburg")
     destination = body.get("destination", "Cape Town")
-    date = body.get("date", (datetime.now() + timedelta(days=14)).strftime("%Y-%m-%d"))
+    date = body.get("date", "")
     num_results = int(body.get("num_results", 5))
 
     origin_code = resolve_airport(origin)
     dest_code = resolve_airport(destination)
 
     try:
-        flights = fetch_real_flights(origin_code, dest_code, num_results)
-        source = "aviationstack"
+        today = datetime.now().strftime("%Y-%m-%d")
+        is_today = (not date) or (date == today)
+        if is_today:
+            flights = fetch_real_flights(origin_code, dest_code, num_results)
+            source = "aviationstack"
+        else:
+            flights = generate_mock_flights(origin_code, dest_code, date, num_results)
+            source = "mock (future date)"
     except Exception as e:
         print(f"AviationStack API failed ({e}), using mock data")
         flights = generate_mock_flights(origin_code, dest_code, date, num_results)

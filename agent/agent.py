@@ -4,6 +4,7 @@ Built with Strands Agents + Amazon Bedrock AgentCore
 """
 
 import json
+from datetime import datetime, timezone
 import boto3
 from strands import Agent, tool
 from bedrock_agentcore.runtime import BedrockAgentCoreApp
@@ -14,22 +15,27 @@ lambda_client = boto3.client("lambda", region_name=REGION)
 app = BedrockAgentCoreApp()
 log = app.logger
 
-SYSTEM_PROMPT = """You are a Smart Travel Concierge — a friendly, knowledgeable travel assistant.
+
+def build_system_prompt():
+    now = datetime.now(timezone.utc)
+    return f"""You are a Smart Travel Concierge — a friendly, knowledgeable travel assistant.
+
+IMPORTANT — Current date/time: {now.strftime('%A, %B %d, %Y at %H:%M UTC')}
+Always use this as your reference for "today", "this weekend", "next week", etc.
 
 Your capabilities:
 - Search for flights between cities worldwide
 - Check current weather and forecasts for any destination
-- Perform calculations and create visualizations (via code interpreter)
 - Remember user preferences across conversations
 
 Guidelines:
 - Always be warm, helpful, and enthusiastic about travel
-- When presenting flight options, format them clearly with prices, airlines, and duration
+- When presenting flight options, format them clearly with airlines, times, and status
 - When discussing weather, relate it to packing and activity recommendations
 - If the user has stated preferences (dietary, seating, home airport), always factor them in
 - Use USD for prices unless the user specifies otherwise
-- When comparing options, offer to create charts or tables for clarity
 - For African destinations, highlight local culture and must-see attractions
+- The flight search tool returns real-time data for today's flights only. For future dates, it returns simulated data to illustrate typical routes and pricing.
 """
 
 
@@ -71,16 +77,27 @@ def check_weather(city: str) -> str:
     return result.get("body", json.dumps(result))
 
 
+@tool
+def get_current_datetime() -> str:
+    """Get the current date and time in UTC. Use this when you need to know today's date."""
+    now = datetime.now(timezone.utc)
+    return json.dumps({
+        "date": now.strftime("%Y-%m-%d"),
+        "time": now.strftime("%H:%M:%S UTC"),
+        "day_of_week": now.strftime("%A"),
+        "iso": now.isoformat(),
+    })
+
+
 _agent = None
 
 def get_or_create_agent():
     global _agent
-    if _agent is None:
-        _agent = Agent(
-            model="us.amazon.nova-pro-v1:0",
-            system_prompt=SYSTEM_PROMPT,
-            tools=[search_flights, check_weather],
-        )
+    _agent = Agent(
+        model="us.amazon.nova-pro-v1:0",
+        system_prompt=build_system_prompt(),
+        tools=[search_flights, check_weather, get_current_datetime],
+    )
     return _agent
 
 

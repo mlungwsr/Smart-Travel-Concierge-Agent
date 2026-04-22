@@ -126,11 +126,16 @@ Resources:
               elif body is None: body = event
               origin = body.get("origin", "Johannesburg")
               destination = body.get("destination", "Cape Town")
-              date = body.get("date", (datetime.now() + timedelta(days=14)).strftime("%Y-%m-%d"))
+              date = body.get("date", "")
               num = int(body.get("num_results", 5))
               o, d = resolve_airport(origin), resolve_airport(destination)
               try:
-                  flights, source = fetch_real_flights(o, d, num), "aviationstack"
+                  today = datetime.now().strftime("%Y-%m-%d")
+                  is_today = (not date) or (date == today)
+                  if is_today:
+                      flights, source = fetch_real_flights(o, d, num), "aviationstack"
+                  else:
+                      flights, source = mock_flights(o, d, date, num), "mock (future date)"
               except Exception as e:
                   print(f"AviationStack failed ({e}), using mock")
                   flights, source = mock_flights(o, d, date, num), "mock"
