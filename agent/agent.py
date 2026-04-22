@@ -6,9 +6,13 @@ Built with Strands Agents + Amazon Bedrock AgentCore
 import json
 import boto3
 from strands import Agent, tool
+from bedrock_agentcore.runtime import BedrockAgentCoreApp
 
 REGION = "us-west-2"
 lambda_client = boto3.client("lambda", region_name=REGION)
+
+app = BedrockAgentCoreApp()
+log = app.logger
 
 SYSTEM_PROMPT = """You are a Smart Travel Concierge — a friendly, knowledgeable travel assistant.
 
@@ -30,13 +34,13 @@ Guidelines:
 
 
 @tool
-def search_flights(origin: str, destination: str, date: str, num_results: int = 5) -> str:
+def search_flights(origin: str, destination: str, date: str = "", num_results: int = 5) -> str:
     """Search for flights between two cities.
 
     Args:
         origin: Departure city name (e.g., 'Johannesburg', 'Lagos', 'London')
         destination: Arrival city name (e.g., 'Cape Town', 'Nairobi', 'Dubai')
-        date: Travel date in YYYY-MM-DD format
+        date: Travel date in YYYY-MM-DD format (optional, defaults to today)
         num_results: Number of flight results to return (default 5)
     """
     response = lambda_client.invoke(
@@ -67,12 +71,28 @@ def check_weather(city: str) -> str:
     return result.get("body", json.dumps(result))
 
 
-# --- Create the Agent ---
-agent = Agent(
-    model="us.amazon.nova-pro-v1:0",
-    system_prompt=SYSTEM_PROMPT,
-    tools=[search_flights, check_weather],
-)
+_agent = None
+
+def get_or_create_agent():
+    global _agent
+    if _agent is None:
+        _agent = Agent(
+            model="us.amazon.nova-pro-v1:0",
+            system_prompt=SYSTEM_PROMPT,
+            tools=[search_flights, check_weather],
+        )
+    return _agent
+
+
+@app.entrypoint
+async def invoke(payload, context):
+    log.info("Invoking Travel Concierge Agent...")
+    agent = get_or_create_agent()
+    stream = agent.stream_async(payload.get("prompt"))
+    async for event in stream:
+        if "data" in event and isinstance(event["data"], str):
+            yield event["data"]
+
 
 if __name__ == "__main__":
-    agent.interactive()
+    app.run()
